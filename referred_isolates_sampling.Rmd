@@ -319,12 +319,12 @@ cat("Saved: WGS_results_", stamp, ".xlsx\n", sep = "")
 ```{r sampling}
 # Each organism filtered from df_2025, then passed through sample_org()
 # Resistance screen:  ECO/KPN/ABA/PAE → carbapenems | EFA → VAN | SAU → OXA/FOX
-eco_sample <- df_2025 |> filter(organismcode == "eco") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-kpn_sample <- df_2025 |> filter(organismcode == "kpn") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-aba_sample <- df_2025 |> filter(organismcode == "aba") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-pae_sample <- df_2025 |> filter(organismcode == "pae") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-efa_sample <- df_2025 |> filter(organismcode == "efa") |> sample_org(VAN_RIS,        N_RI, N_S)
-sau_sample <- df_2025 |> filter(organismcode == "sau") |> sample_org(MRSA_RIS,       N_RI, N_S)
+eco_sample <- df_2025 |> filter(organismcode == "eco", spec_type %in% c("bl", "sf", "ur")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+kpn_sample <- df_2025 |> filter(organismcode == "kpn", spec_type %in% c("bl", "sf", "ur", "ti", "ta", "at", "as", "sp")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+aba_sample <- df_2025 |> filter(organismcode == "aba", spec_type %in% c("bl", "sf", "ta")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+pae_sample <- df_2025 |> filter(organismcode == "pae", spec_type %in% c("bl", "sf", "ta", "ti", "sp", "at")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+efa_sample <- df_2025 |> filter(organismcode == "efa", spec_type %in% c("bl", "sf", "ur")) |> sample_org(VAN_RIS,        N_RI, N_S)
+sau_sample <- df_2025 |> filter(organismcode == "sau", spec_type %in% c("bl", "sf", "ta", "at", "ti", "ur", "wd", "as")) |> sample_org(MRSA_RIS,       N_RI, N_S)
 
 samples <- list(
   ECO = eco_sample, KPN = kpn_sample, ABA = aba_sample,
