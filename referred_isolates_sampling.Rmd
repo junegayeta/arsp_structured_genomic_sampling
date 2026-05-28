@@ -165,6 +165,32 @@ ORG_GENUS_MAP <- c(
   efa = "Enterococcus",
   sau = "Staphylococcus"
 )
+
+# ── Specimen type filters ─────────────────────────────────────────────────────
+# Shared base sets — defined once, reused across organisms.
+
+SPEC_URINE_ALL <- c("uc", "ur", "cv", "ub", "uk", "ua", "fv", "uz", "uo", "uu")
+
+SPEC_TISSUE_ALL <- c(
+  "ea", "ey", "mo", "sk", "jt", "og", "um", "bx", "ti", "bn",
+  "he", "hv", "li", "mu", "ha", "ar", "ax", "co", "em", "eo",
+  "fi", "pl", "bt", "bo", "bm", "ki", "du", "me", "bu", "cy",
+  "ln", "gl", "nl", "ft", "au", "us", "cr", "pn", "tn", "ap",
+  "cb", "ec", "ed", "eg", "eh", "fa", "gb", "hi", "kn", "lx",
+  "lp", "lo", "ov", "pi", "po", "rc", "sl", "te", "to", "bv",
+  "hd", "sv", "lg", "nk", "nv", "lv", "gr", "ig"
+)
+
+SPEC_RESP_KPN <- c("no", "th", "sp", "br", "lu", "tr", "si",
+                   "ba", "rl", "ru", "ta", "rp", "np", "sa", "in")
+
+# Per-organism allowlists (update here only if spec eligibility changes)
+SPEC_TYPE_ECO <- c("bl", "sf", SPEC_URINE_ALL)                                  # Blood + CSF + all Urine
+SPEC_TYPE_KPN <- c("bl", "sf", SPEC_URINE_ALL, SPEC_TISSUE_ALL, SPEC_RESP_KPN)  # Blood + CSF + all Urine + all Tissue + all Respiratory
+SPEC_TYPE_ABA <- c("bl", "sf", "ta", SPEC_URINE_ALL, SPEC_TISSUE_ALL)           # Blood + CSF + ta only + all Urine + all Tissue
+SPEC_TYPE_PAE <- SPEC_TYPE_KPN                                                   # identical to KPN
+SPEC_TYPE_EFA <- c("bl", "sf", SPEC_URINE_ALL)                                  # Blood + CSF + all Urine
+SPEC_TYPE_SAU <- SPEC_TYPE_ABA                                                   # identical to ABA
 ```
 
 ---
@@ -317,14 +343,15 @@ cat("Saved: WGS_results_", stamp, ".xlsx\n", sep = "")
 ```
 
 ```{r sampling}
-# Each organism filtered from df_2025, then passed through sample_org()
+# Each organism filtered from df_2025 (organismcode + spec_type), then passed through sample_org()
 # Resistance screen:  ECO/KPN/ABA/PAE → carbapenems | EFA → VAN | SAU → OXA/FOX
-eco_sample <- df_2025 |> filter(organismcode == "eco", spec_type %in% c("bl", "sf", "ur")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-kpn_sample <- df_2025 |> filter(organismcode == "kpn", spec_type %in% c("bl", "sf", "ur", "ti", "ta", "at", "as", "sp")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-aba_sample <- df_2025 |> filter(organismcode == "aba", spec_type %in% c("bl", "sf", "ta")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-pae_sample <- df_2025 |> filter(organismcode == "pae", spec_type %in% c("bl", "sf", "ta", "ti", "sp", "at")) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
-efa_sample <- df_2025 |> filter(organismcode == "efa", spec_type %in% c("bl", "sf", "ur")) |> sample_org(VAN_RIS,        N_RI, N_S)
-sau_sample <- df_2025 |> filter(organismcode == "sau", spec_type %in% c("bl", "sf", "ta", "at", "ti", "ur", "wd", "as")) |> sample_org(MRSA_RIS,       N_RI, N_S)
+# Spec-type allowlists defined in config chunk (SPEC_TYPE_*) — update there, not here.
+eco_sample <- df_2025 |> filter(organismcode == "eco", spec_type %in% SPEC_TYPE_ECO) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+kpn_sample <- df_2025 |> filter(organismcode == "kpn", spec_type %in% SPEC_TYPE_KPN) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+aba_sample <- df_2025 |> filter(organismcode == "aba", spec_type %in% SPEC_TYPE_ABA) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+pae_sample <- df_2025 |> filter(organismcode == "pae", spec_type %in% SPEC_TYPE_PAE) |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+efa_sample <- df_2025 |> filter(organismcode == "efa", spec_type %in% SPEC_TYPE_EFA) |> sample_org(VAN_RIS,        N_RI, N_S)
+sau_sample <- df_2025 |> filter(organismcode == "sau", spec_type %in% SPEC_TYPE_SAU) |> sample_org(MRSA_RIS,       N_RI, N_S)
 
 samples <- list(
   ECO = eco_sample, KPN = kpn_sample, ABA = aba_sample,
