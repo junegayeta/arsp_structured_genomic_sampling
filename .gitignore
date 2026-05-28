@@ -1,0 +1,12 @@
+# Ignore output folders and HTML reports
+output/
+*.html
+
+# Ignore temporary Excel lock files
+~$*.xlsx
+*.tmp
+
+# Standard R ignores
+.Rhistory
+.RData
+*_cache/

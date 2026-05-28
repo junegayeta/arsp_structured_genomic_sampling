@@ -1,0 +1,387 @@
+---
+title: "2025 Referred Isolates – Structured Survey Sampling"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+---
+
+**Purpose:** Structured selection of referred bacterial isolates for AMR surveillance from the 2025 ARSRL database. For six priority organisms (ECO, KPN, ABA, PAE, EFA, SAU), the script draws the first **15 resistant/intermediate** and **5 susceptible** isolates per site, sorted by collection date. WGS results are pulled from a Google Sheet, deduplicated, and joined to flag sequencing status and concordance. Output is a date-time stamped Excel workbook with a master list, selection list, and site-level summary per organism.
+
+---
+
+```{r packages}
+library(readxl)        # read Excel input file
+library(dplyr)         # data wrangling
+library(tidyr)         # pivot_wider for summary tables
+library(openxlsx)      # Excel export
+library(googlesheets4) # read WGS results from Google Sheets
+```
+
+---
+
+## 1. Load Data
+
+### 1a. Isolate database (Excel)
+> Source: `Combined Data on Referred Isolates_05.14.26.xlsx`, sheet `ARSRL`.
+
+```{r load}
+df <- read_excel(
+  "D:/Google Drive/My Drive/Referred_Access_db/2025/Combined Data on Referred Isolates_05.14.26.xlsx",
+  sheet = "ARSRL",
+  col_types = "text"   # prevent type misdetection on sparse columns
+)
+```
+
+### 1d. Year filter → `df_2025`
+> Filter to current year records only using `accession_no` prefix.
+> Update `YEAR_PREFIX` in this chunk for succeeding years (e.g. `"26ARS"`).
+
+```{r year_filter}
+YEAR_PREFIX <- "25ARS"   # change to "26ARS", "27ARS" etc. for succeeding years
+
+df_2025 <- df |> filter(startsWith(accession_no, YEAR_PREFIX))
+cat("Records for", YEAR_PREFIX, ":", nrow(df_2025), "of", nrow(df), "total\n")
+```
+
+### 1e. Data Cleaning → `df_2025`
+> All cleaning applied once to `df_2025` before any analysis.
+
+```{r cleaning}
+df_2025 <- df_2025 |>
+
+  # Drop unused columns
+  select(-any_of(c("ct/ctl", "tz/tzl", "cn/cni", "recommendation",
+                   "growth", "urine_colct", "arsrl_pre", "reason",
+                   "Concordance_Check"))) |>
+
+  # Convert Excel serial numbers (stored as text) to Date
+  # All date columns use origin "1899-12-30" (Excel epoch)
+  mutate(
+    spec_date     = as.Date(as.numeric(spec_date),     origin = "1899-12-30"),
+    referral_date = as.Date(as.numeric(referral_date), origin = "1899-12-30"),
+    date_birth    = as.Date(as.numeric(date_birth),    origin = "1899-12-30"),
+    date_admis    = as.Date(as.numeric(date_admis),    origin = "1899-12-30")
+  ) |>
+
+  # Extract laboratory code from characters 7–9 of accession_no
+  # e.g. 25ARS_BRT0034 → BRT
+  mutate(laboratory = substr(accession_no, 7, 9)) |>
+  relocate(laboratory, .after = accession_no) |>
+
+  # Merge diagnosis columns: diagnosis_icd10 takes priority; falls back to diagnosis
+  mutate(diagnosis = coalesce(diagnosis_icd10, diagnosis)) |>
+  select(-diagnosis_icd10)
+```
+
+### 1b. WGS results (Google Sheets)
+> Raw WGS run results; may contain duplicates per sample due to repeat sequencing.
+
+```{r read_gsheet, message=FALSE, include=FALSE}
+df_WGS_result <- read_sheet(
+  "1NHu-RIgDeTPKgrnTTHS9qVbCe04tIeYX6k73Jm93gDw",
+  sheet = "result_2025"
+)
+```
+
+### 1c. Deduplicate WGS results → `df_WGS_result_dedup`
+> Some samples were sequenced more than once (e.g. repeat after initial failure).
+> **Dedup rules:**
+> 1. PASSED > FAILED (keep the best result per sample)
+> 2. If both PASSED, keep the most recent run by `batch_date`
+>
+> `batch_code` format: `YYYY-MM-DD_P/A/N` — suffix stripped to extract date.
+> `seq_id` = combined sample + batch identifier for downstream file matching.
+
+```{r dedup_wgs}
+df_WGS_result_dedup <- df_WGS_result |>
+  mutate(
+    # Extract run date from batch_code (strip _P / _A / _N suffix)
+    batch_date  = as.Date(sub("_[A-Z]+$", "", batch_code)),
+    result_rank = case_when(
+      final_result == "PASSED" ~ 1L,  # best
+      final_result == "FAILED" ~ 2L,
+      TRUE                     ~ 3L
+    )
+  ) |>
+  arrange(sample_id, result_rank, desc(batch_date)) |>
+  distinct(sample_id, .keep_all = TRUE) |>          # keep top row per sample
+  select(-batch_date, -result_rank) |>
+  mutate(
+    # Sequence file ID: 25ARS_APM0010 + 2025-09-16_P → 25ARS-APM0010-20250916P
+    seq_id = paste0(
+      gsub("_", "-", sample_id),     # underscore → hyphen in sample ID
+      "-",
+      gsub("[-_]", "", batch_code)   # remove dashes/underscore from batch date
+    )
+  ) |>
+  relocate(seq_id, .after = sample_id)
+
+cat("WGS records after deduplication:", nrow(df_WGS_result_dedup), "\n")
+```
+
+---
+
+## 2. Sampling Configuration
+
+```{r config}
+# Sample size per laboratory per organism
+N_RI <- 15   # Resistant or Intermediate
+N_S  <- 5    # Susceptible
+
+# Resistance markers — both disk (ND) and MIC (NM) interpretation columns included.
+# An isolate is flagged if ANY column in the set = "R" or "I".
+
+# Carbapenems: IPM, MEM, ETP, DOR  →  ECO, KPN, ABA, PAE
+CARBAPENEM_RIS <- c(
+  "ipm_nd10_ris", "ipm_nm_ris",
+  "mem_nd10_ris", "mem_nm_ris",
+  "etp_nd10_ris", "etp_nm_ris",
+  "dor_nd10_ris", "dor_nm_ris"
+)
+
+# Vancomycin  →  EFA (VRE screen)
+VAN_RIS <- c("van_nd30_ris", "van_nm_ris")
+
+# Oxacillin / Cefoxitin  →  SAU (MRSA screen)
+MRSA_RIS <- c("oxa_nd1_ris", "oxa_nm_ris", "fox_nd30_ris", "fox_nm_ris")
+
+# WGS concordance: expected genus per organismcode.
+# Genus-level match is accepted (e.g. "Klebsiella" matches kpn).
+# Exception: Enterococcus faecium is DISCORDANT for efa.
+ORG_GENUS_MAP <- c(
+  eco = "Escherichia",
+  kpn = "Klebsiella",
+  aba = "Acinetobacter",
+  pae = "Pseudomonas",
+  efa = "Enterococcus",
+  sau = "Staphylococcus"
+)
+```
+
+---
+
+## 3. Helper Functions
+
+```{r helpers}
+# ── attach_wgs() ──────────────────────────────────────────────────────────────
+# Joins WGS data (final_result, seq_id, wgs_id) to isolate records via AccessionNo.
+# Steps:
+#   1. Left-join df_WGS_result_dedup on AccessionNo = sample_id
+#   2. Concordance check — genus of wgs_id vs expected genus for that organism
+#      → DISCORDANT overrides final_result to "FAILED"
+#   3. Derive WGS_Status: PASSED / FAILED / No (not sequenced)
+#   4. Derive WGS_Status label (PASSED / FAILED / No) for reporting only — no effect on sort order
+attach_wgs <- function(data) {
+  data |>
+    left_join(
+      df_WGS_result_dedup |> select(sample_id, final_result, seq_id, wgs_id),
+      by = c("accession_no" = "sample_id")
+    ) |>
+    mutate(
+      wgs_genus      = sub(" .*$", "", wgs_id),          # first word = genus
+      expected_genus = ORG_GENUS_MAP[organismcode],
+      concordance    = case_when(
+        is.na(wgs_id)                                                         ~ NA_character_,
+        wgs_genus == expected_genus &
+          !(organismcode == "efa" & wgs_id == "Enterococcus faecium")         ~ "CONCORDANT",
+        TRUE                                                                  ~ "DISCORDANT"
+      ),
+      final_result   = if_else(concordance == "DISCORDANT", "FAILED", final_result),
+      WGS_Status     = case_when(
+        final_result == "PASSED" ~ "PASSED",
+        final_result == "FAILED" ~ "FAILED",
+        TRUE                     ~ "No"
+      ),
+    ) |>
+    select(-wgs_genus, -expected_genus)
+}
+
+# ── sample_org() ──────────────────────────────────────────────────────────────
+# For a single organism's data:
+#   - Attaches WGS info (attach_wgs)
+#   - Selects first N_RI R/I isolates per laboratory, sorted by spec_date (earliest first)
+#   - Selects first N_S   S   isolates per laboratory, same sort
+# Returns combined list with a Category column.
+sample_org <- function(data, ris_cols, n_ri, n_s) {
+  data <- attach_wgs(data)
+
+  ri <- data |>
+    filter(if_any(any_of(ris_cols), ~ . %in% c("R", "I"))) |>
+    arrange(laboratory, spec_date) |>
+    group_by(laboratory) |>
+    slice_head(n = n_ri) |>
+    ungroup() |>
+    mutate(Category = "Resistant/Intermediate")
+
+  sus <- data |>
+    filter(if_all(any_of(ris_cols), ~ is.na(.) | . == "S")) |>
+    arrange(laboratory, spec_date) |>
+    group_by(laboratory) |>
+    slice_head(n = n_s) |>
+    ungroup() |>
+    mutate(Category = "Susceptible")
+
+  bind_rows(ri, sus)
+}
+
+# ── drop_empty_cols() ─────────────────────────────────────────────────────────
+# Removes columns where every value is NA (antibiotics not tested for that organism).
+drop_empty_cols <- function(data) {
+  data[, colSums(!is.na(data)) > 0, drop = FALSE]
+}
+
+# ── summarise_org() ───────────────────────────────────────────────────────────
+# Site-level distribution table:
+#   Columns: laboratory | R/I count | S count | Total | RI_WGS_Passed | S_WGS_Passed | Total_WGS_Passed
+#   Last row: column totals (TOTAL).
+# WGS_Passed counts only PASSED — discordant isolates are already set to FAILED
+# upstream so they are excluded automatically.
+summarise_org <- function(sample_data) {
+  counts <- sample_data |>
+    group_by(laboratory, Category) |>
+    summarise(Count = n(), .groups = "drop") |>
+    complete(laboratory, Category = c("Resistant/Intermediate", "Susceptible"),
+             fill = list(Count = 0)) |>
+    pivot_wider(names_from = Category, values_from = Count, values_fill = 0)
+
+  ri_wgs <- sample_data |>
+    filter(Category == "Resistant/Intermediate") |>
+    group_by(laboratory) |>
+    summarise(RI_WGS_Passed = sum(WGS_Status == "PASSED"), .groups = "drop")
+
+  s_wgs <- sample_data |>
+    filter(Category == "Susceptible") |>
+    group_by(laboratory) |>
+    summarise(S_WGS_Passed = sum(WGS_Status == "PASSED"), .groups = "drop")
+
+  tbl <- counts |>
+    left_join(ri_wgs, by = "laboratory") |>
+    left_join(s_wgs,  by = "laboratory") |>
+    replace_na(list(RI_WGS_Passed = 0L, S_WGS_Passed = 0L)) |>
+    mutate(
+      Total            = rowSums(across(c(`Resistant/Intermediate`, Susceptible))),
+      Total_WGS_Passed = RI_WGS_Passed + S_WGS_Passed
+    ) |>
+    select(laboratory, `Resistant/Intermediate`, Susceptible, Total,
+           RI_WGS_Passed, S_WGS_Passed, Total_WGS_Passed) |>
+    arrange(laboratory)
+
+  total_row <- tbl |>
+    summarise(across(where(is.numeric), sum)) |>
+    mutate(laboratory = "TOTAL")
+
+  bind_rows(tbl, total_row)
+}
+```
+
+---
+
+## 4. Save WGS Data
+
+> Raw and deduplicated WGS results saved as separate Excel files for audit/reference.
+
+```{r save_wgs}
+stamp <- format(Sys.Date(), "%Y-%m-%d")
+
+# Add seq_id to raw (all rows, duplicates included); same formula as dedup
+wgs_raw_export <- df_WGS_result |>
+  mutate(seq_id = paste0(gsub("_", "-", sample_id), "-", gsub("[-_]", "", batch_code))) |>
+  relocate(seq_id, .after = sample_id)
+
+# One workbook, two sheets: raw (with seq_id) and deduplicated (seq_id already present)
+wb_wgs <- createWorkbook()
+addWorksheet(wb_wgs, "WGS_Raw");   writeData(wb_wgs, "WGS_Raw",   wgs_raw_export)
+addWorksheet(wb_wgs, "WGS_Dedup"); writeData(wb_wgs, "WGS_Dedup", df_WGS_result_dedup)
+
+saveWorkbook(wb_wgs,
+  paste0("D:/R/structured/selection/output/WGS_results_", stamp, ".xlsx"),
+  overwrite = TRUE)
+cat("Saved: WGS_results_", stamp, ".xlsx\n", sep = "")
+```
+
+---
+
+## 5. Data Preparation & Sampling
+
+```{r prep}
+# df_2025 is cleaned and ready — see cleaning chunk in Section 1e
+```
+
+```{r sampling}
+# Each organism filtered from df_2025, then passed through sample_org()
+# Resistance screen:  ECO/KPN/ABA/PAE → carbapenems | EFA → VAN | SAU → OXA/FOX
+eco_sample <- df_2025 |> filter(organismcode == "eco") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+kpn_sample <- df_2025 |> filter(organismcode == "kpn") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+aba_sample <- df_2025 |> filter(organismcode == "aba") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+pae_sample <- df_2025 |> filter(organismcode == "pae") |> sample_org(CARBAPENEM_RIS, N_RI, N_S)
+efa_sample <- df_2025 |> filter(organismcode == "efa") |> sample_org(VAN_RIS,        N_RI, N_S)
+sau_sample <- df_2025 |> filter(organismcode == "sau") |> sample_org(MRSA_RIS,       N_RI, N_S)
+
+samples <- list(
+  ECO = eco_sample, KPN = kpn_sample, ABA = aba_sample,
+  PAE = pae_sample, EFA = efa_sample, SAU = sau_sample
+)
+
+# Console summary: selection counts + WGS breakdown per organism
+for (org in names(samples)) {
+  d <- samples[[org]]
+  cat(org,
+      "— RI:",         sum(d$Category   == "Resistant/Intermediate"),
+      "| S:",          sum(d$Category   == "Susceptible"),
+      "| WGS PASSED:", sum(d$WGS_Status == "PASSED"),
+      "| WGS FAILED:", sum(d$WGS_Status == "FAILED"),
+      "| No WGS:",     sum(d$WGS_Status == "No"), "\n")
+}
+```
+
+---
+
+## 6. Export to Excel
+
+> One workbook per run, filename date-time stamped.
+> **Sheet order per organism:** `{ORG}_Master` → `{ORG}` (selection) → `{ORG}_Summary`
+> Name columns (first_name, mid_name, last_name) excluded from all sheets.
+> All-NA columns dropped per organism (antibiotics not applicable to that species).
+
+```{r export}
+wb <- createWorkbook()
+
+for (org in names(samples)) {
+
+  # Master: full organism records from df_2025 with WGS info attached
+  master <- df_2025 |>
+    filter(organismcode == tolower(org)) |>
+    attach_wgs() |>
+    select(-any_of(c("first_name", "mid_name", "last_name"))) |>
+    drop_empty_cols()
+
+  # Selection: 15 RI + 5 S per laboratory, sorted by spec_date
+  data <- samples[[org]] |>
+    select(-any_of(c("first_name", "mid_name", "last_name"))) |>
+    drop_empty_cols()
+
+  # Summary: site × category counts with WGS_Passed breakdown
+  summary <- summarise_org(samples[[org]])
+
+  addWorksheet(wb, paste0(org, "_Master"));  writeData(wb, paste0(org, "_Master"),  master)
+  addWorksheet(wb, org);                     writeData(wb, org,                     data)
+  addWorksheet(wb, paste0(org, "_Summary")); writeData(wb, paste0(org, "_Summary"), summary)
+}
+
+out_file <- paste0(
+  "D:/R/structured/selection/output/referred_sample_",
+  format(Sys.time(), "%Y-%m-%d_%H%M%S"),
+  ".xlsx"
+)
+saveWorkbook(wb, out_file, overwrite = TRUE)
+cat("Saved:", out_file, "\n")
+```
